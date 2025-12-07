@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, Clock, Lock, Unlock, Download, RefreshCw, Zap, Disc, FileHeart, ShieldAlert, X, Fingerprint, AlertTriangle, Skull, Gamepad2, Siren, CheckCircle2, RotateCw, Ban } from 'lucide-react';
+import { Upload, Clock, Lock, Unlock, Download, RefreshCw, Zap, Disc, FileHeart, ShieldAlert, X, Fingerprint, AlertTriangle, Skull, Gamepad2, Siren, CheckCircle2, RotateCw, Ban, Save, Dna } from 'lucide-react';
 
 // --- 安全核心层 ---
 const APP_SECRET_KEY = "OMEGA-PROTOCOL-V2-BINDING-KEY-9923-X";
@@ -34,29 +34,43 @@ const SecurityLayer = {
   }
 };
 
+// --- 确定性伪随机数生成器 (PRNG) ---
+// 线性同余生成器，保证同一种子必定生成同一序列
+const pseudoRandom = (seed) => {
+  let value = seed % 2147483647;
+  if (value <= 0) value += 2147483646;
+  return () => {
+    value = (value * 16807) % 2147483647;
+    return (value - 1) / 2147483646;
+  };
+};
+
+// --- 缓动函数 ---
+const easeOutCubic = (x) => 1 - Math.pow(1 - x, 3);
+
 // --- 轮盘小游戏组件 ---
-const RouletteGame = ({ onComplete, onClose, remainingAttempts }) => {
+const RouletteGame = ({ onComplete, onClose, remainingAttempts, entropySeed }) => {
   const canvasRef = useRef(null);
   
-  // UI 渲染状态
   const [gameState, setGameState] = useState('idle'); 
   const [resultText, setResultText] = useState(null);
   
-  // 动画逻辑状态 (Ref 确保在 RAF 循环中始终能获取最新值)
-  const gameStateRef = useRef('idle');
+  // 动画状态
   const rotationRef = useRef(0);
-  const speedRef = useRef(0);
   const animationRef = useRef();
+  const startTimeRef = useRef(0);
+  const startRotationRef = useRef(0);
+  const targetRotationRef = useRef(0);
 
-  // 区域定义 (角度越大，概率越高)
+  // 区域定义
   const SECTORS = [
-    { color: '#ef4444', label: '+60m', value: 60 * 60 * 1000, angle: 75, textCol: '#fff' }, 
-    { color: '#f97316', label: '+30m', value: 30 * 60 * 1000, angle: 65, textCol: '#fff' }, 
-    { color: '#fbbf24', label: '+10m', value: 10 * 60 * 1000, angle: 55, textCol: '#000' }, 
-    { color: '#fde047', label: '+1m',  value: 1 * 60 * 1000,  angle: 50, textCol: '#000' }, 
-    { color: '#bef264', label: '-10m', value: -10 * 60 * 1000, angle: 45, textCol: '#000' }, 
-    { color: '#4ade80', label: '-30m', value: -30 * 60 * 1000, angle: 40, textCol: '#000' }, 
-    { color: '#22d3ee', label: '-60m', value: -60 * 60 * 1000, angle: 30, textCol: '#000' }, 
+    { color: '#ef4444', label: '+60分', value: 60 * 60 * 1000, angle: 75, textCol: '#fff' }, 
+    { color: '#f97316', label: '+30分', value: 30 * 60 * 1000, angle: 65, textCol: '#fff' }, 
+    { color: '#fbbf24', label: '+10分', value: 10 * 60 * 1000, angle: 55, textCol: '#000' }, 
+    { color: '#fde047', label: '+1分',  value: 1 * 60 * 1000,  angle: 50, textCol: '#000' }, 
+    { color: '#bef264', label: '-10分', value: -10 * 60 * 1000, angle: 45, textCol: '#000' }, 
+    { color: '#4ade80', label: '-30分', value: -30 * 60 * 1000, angle: 40, textCol: '#000' }, 
+    { color: '#22d3ee', label: '-60分', value: -60 * 60 * 1000, angle: 30, textCol: '#000' }, 
   ];
 
   // 绘制轮盘 (静态背景)
@@ -103,60 +117,63 @@ const RouletteGame = ({ onComplete, onClose, remainingAttempts }) => {
     ctx.stroke();
   }, []);
 
-  // 动画循环
-  const animate = () => {
-    // 1. 更新角度
-    rotationRef.current = (rotationRef.current + speedRef.current) % 360;
-    
-    // 直接操作 DOM 样式以避免 React 渲染开销导致的卡顿
+  // 渲染当前角度到 DOM
+  const renderRotation = (deg) => {
     const wheelElement = document.getElementById('roulette-wheel');
     if (wheelElement) {
-        wheelElement.style.transform = `rotate(${rotationRef.current}deg)`;
+        wheelElement.style.transform = `rotate(${deg}deg)`;
     }
+  };
 
-    // 2. 检查状态 (使用 Ref 读取最新状态)
-    if (gameStateRef.current === 'stopping') {
-      // 减速逻辑
-      speedRef.current *= 0.985; // 摩擦力
-      if (speedRef.current < 0.1) {
-        speedRef.current = 0;
-        
-        // 动画结束
-        gameStateRef.current = 'result';
-        setGameState('result'); // 触发 React 渲染显示结果UI
-        calculateResult();
-        return; // 退出循环
-      }
+  // 核心动画循环 (基于时间)
+  const animate = (time) => {
+    if (!startTimeRef.current) startTimeRef.current = time;
+    const elapsed = time - startTimeRef.current;
+    const duration = 5000; // 5秒旋转时间
+
+    if (elapsed < duration) {
+      const progress = elapsed / duration;
+      const ease = easeOutCubic(progress);
+      
+      const currentRot = startRotationRef.current + (targetRotationRef.current - startRotationRef.current) * ease;
+      rotationRef.current = currentRot;
+      renderRotation(currentRot);
+      
+      animationRef.current = requestAnimationFrame(animate);
+    } else {
+      rotationRef.current = targetRotationRef.current;
+      renderRotation(targetRotationRef.current);
+      
+      setGameState('result');
+      calculateResult(targetRotationRef.current);
     }
+  };
+
+  const handleStart = () => {
+    if (gameState !== 'idle') return;
+    setGameState('spinning');
+
+    // === 命运演算 ===
+    const rng = pseudoRandom(entropySeed);
+    
+    // 1. 确定最终停止的角度 (0-360)
+    const finalAngle = rng() * 360; 
+    
+    // 2. 计算需要旋转的总圈数 (5圈 + 目标角度)
+    const spins = 5; 
+    const delta = (360 * spins) + finalAngle;
+    
+    startRotationRef.current = rotationRef.current;
+    targetRotationRef.current = startRotationRef.current + delta;
+    startTimeRef.current = 0;
 
     animationRef.current = requestAnimationFrame(animate);
   };
 
-  // 开始/停止控制
-  const handleAction = () => {
-    if (gameStateRef.current === 'idle') {
-      speedRef.current = 20; // 初始速度
-      
-      // 同步更新 Ref 和 State
-      gameStateRef.current = 'spinning';
-      setGameState('spinning');
-      
-      animationRef.current = requestAnimationFrame(animate);
-    } else if (gameStateRef.current === 'spinning') {
-      // 点击停止
-      gameStateRef.current = 'stopping';
-      setGameState('stopping');
-      
-      // 添加随机量防止背板
-      speedRef.current += Math.random() * 5; 
-    }
-  };
-
   // 计算结果
-  const calculateResult = () => {
-    // 使用 Ref 中的最终角度计算
-    const finalRotation = rotationRef.current;
-    const pointerAngleOnWheel = (270 - finalRotation + 360) % 360;
+  const calculateResult = (finalRot) => {
+    const normalizeRot = finalRot % 360;
+    const pointerAngleOnWheel = (270 - normalizeRot + 360) % 360;
     
     let currentAngle = 0;
     let hitSector = null;
@@ -184,10 +201,7 @@ const RouletteGame = ({ onComplete, onClose, remainingAttempts }) => {
   return (
     <div className="absolute inset-0 bg-slate-950/95 z-30 flex flex-col items-center justify-center p-4 backdrop-blur-md animate-in fade-in zoom-in duration-200">
       <div className="relative">
-        {/* 指针 */}
         <div className="absolute -top-6 left-1/2 -translate-x-1/2 z-20 w-0 h-0 border-l-[10px] border-l-transparent border-r-[10px] border-r-transparent border-t-[20px] border-t-white drop-shadow-[0_0_10px_rgba(255,255,255,0.8)]"></div>
-        
-        {/* 轮盘 DOM */}
         <div 
           id="roulette-wheel"
           style={{ transform: `rotate(${rotationRef.current}deg)` }} 
@@ -197,38 +211,38 @@ const RouletteGame = ({ onComplete, onClose, remainingAttempts }) => {
         </div>
       </div>
 
-      {/* 结果展示 */}
       <div className="h-16 mt-8 flex items-center justify-center w-full">
         {gameState === 'result' && resultText ? (
            <div className={`text-2xl font-black font-mono animate-bounce ${resultText.value > 0 ? 'text-red-500' : 'text-green-400'}`}>
               {resultText.value > 0 ? `警报: 时间增加 ${resultText.label}` : `骇入成功: 时间减少 ${resultText.label.replace('-','')}`}
            </div>
         ) : (
-           <div className="text-slate-500 font-mono text-sm">
-              剩余尝试次数: <span className="text-white font-bold">{remainingAttempts}</span>
+           <div className="text-slate-500 font-mono text-sm flex flex-col items-center">
+              <div>剩余尝试次数: <span className="text-white font-bold">{remainingAttempts}</span></div>
+              <div className="text-[10px] text-purple-500/50 mt-1 flex items-center">
+                <Dna className="w-3 h-3 mr-1"/> 
+                命运因子: #{entropySeed % 9999}
+              </div>
            </div>
         )}
       </div>
 
-      {/* 控制按钮 */}
       <div className="w-full max-w-xs space-y-3">
         {gameState !== 'result' && (
           <button 
-            onClick={handleAction}
-            disabled={gameState === 'stopping'}
+            onClick={handleStart}
+            disabled={gameState === 'spinning'}
             className={`w-full py-4 rounded-xl font-black text-lg uppercase tracking-widest transition-all shadow-lg ${
               gameState === 'idle' 
                 ? 'bg-gradient-to-r from-pink-600 to-purple-600 hover:scale-105 text-white shadow-pink-500/30' 
-                : gameState === 'spinning'
-                ? 'bg-red-600 hover:bg-red-500 text-white animate-pulse shadow-red-500/30'
-                : 'bg-slate-700 text-slate-500 cursor-not-allowed'
+                : 'bg-red-600/50 text-white/50 cursor-not-allowed animate-pulse'
             }`}
           >
-            {gameState === 'idle' ? '启动轮盘' : gameState === 'spinning' ? '停止 !' : '计算中...'}
+            {gameState === 'idle' ? '启动命运轮盘' : '命运演算中...'}
           </button>
         )}
         
-        <button onClick={onClose} className="w-full py-2 text-xs text-slate-500 hover:text-white transition-colors">
+        <button onClick={onClose} disabled={gameState === 'spinning'} className="w-full py-2 text-xs text-slate-500 hover:text-white transition-colors disabled:opacity-30">
           放弃并返回
         </button>
       </div>
@@ -241,43 +255,39 @@ export default function App() {
   const [imageData, setImageData] = useState(null);
   const [fileName, setFileName] = useState("");
   
-  // 时间设置
   const [hours, setHours] = useState(0);
   const [minutes, setMinutes] = useState(0);
   const [seconds, setSeconds] = useState(10);
   
-  // 状态管理
   const [timeLeftMs, setTimeLeftMs] = useState(0);
   const [endTime, setEndTime] = useState(0);
   const [status, setStatus] = useState('idle'); 
   const [isTimeLocked, setIsTimeLocked] = useState(false);
   
-  // 安全与警告状态
   const [hasDownloaded, setHasDownloaded] = useState(false); 
   const [showBackupWarning, setShowBackupWarning] = useState(false); 
   const [abortStage, setAbortStage] = useState(0); 
   
-  // 游戏相关状态 (持久化数据)
   const [showGame, setShowGame] = useState(false);
-  const [gameAttempts, setGameAttempts] = useState(5); // 剩余次数
-  const [gameCooldownEnd, setGameCooldownEnd] = useState(0); // 冷却结束时间戳
+  const [gameAttempts, setGameAttempts] = useState(5); 
+  const [gameCooldownEnd, setGameCooldownEnd] = useState(0); 
   
+  const [entropySeed, setEntropySeed] = useState(() => Math.floor(Math.random() * 1000000));
+
   const fileInputRef = useRef(null);
   const restoreInputRef = useRef(null);
   const requestRef = useRef();
   const abortTimeoutRef = useRef(); 
 
-  // 动画循环：处理倒计时 + 游戏冷却检查
   const animateTimer = () => {
     const now = Date.now();
     const remaining = Math.max(0, endTime - now);
     
     setTimeLeftMs(remaining);
 
-    // 检查冷却是否结束（重置次数）
     if (gameCooldownEnd > 0 && now > gameCooldownEnd) {
       setGameCooldownEnd(0);
-      setGameAttempts(5); // 恢复5次机会
+      setGameAttempts(5); 
     }
 
     if (remaining > 0) {
@@ -308,28 +318,39 @@ export default function App() {
         setIsTimeLocked(false);
         setHasDownloaded(false); 
         setShowBackupWarning(false);
-        // 重置游戏状态
         setGameAttempts(5);
         setGameCooldownEnd(0);
+        setEntropySeed(Math.floor(Math.random() * 1000000));
       };
       reader.readAsDataURL(file);
     }
   };
 
-  const downloadBackup = () => {
+  const downloadBackup = (isMidRun = false) => {
     if (!imageData) return;
-    const totalSeconds = parseInt(hours) * 3600 + parseInt(minutes) * 60 + parseInt(seconds);
-    if (totalSeconds <= 0) { alert("必须先设定有效的时间才能生成契约文件。"); return; }
+
+    let secondsToSave;
+
+    if (isMidRun) {
+      const now = Date.now();
+      const remaining = Math.max(0, endTime - now);
+      secondsToSave = Math.floor(remaining / 1000);
+      if (secondsToSave <= 0) return; 
+    } else {
+      secondsToSave = parseInt(hours) * 3600 + parseInt(minutes) * 60 + parseInt(seconds);
+    }
     
-    // 备份包含游戏状态
+    if (secondsToSave <= 0) { alert("必须先设定有效的时间才能生成契约文件。"); return; }
+    
     const backupPayload = JSON.stringify({
-      v: 5, 
+      v: 6, 
       n: fileName,
-      duration: totalSeconds,
+      duration: secondsToSave,
       d: imageData,
-      g: { // Game Data
+      g: { 
         att: gameAttempts,
-        cd: gameCooldownEnd
+        cd: gameCooldownEnd,
+        seed: entropySeed 
       }
     });
 
@@ -339,13 +360,17 @@ export default function App() {
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `SECURE_DATA_${Date.now()}.krypton`; 
+      const prefix = isMidRun ? "MID_RUN_SAVE" : "SECURE_DATA";
+      link.download = `${prefix}_${Date.now()}.krypton`; 
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-      setHasDownloaded(true); 
-      setShowBackupWarning(false); 
+      
+      if (!isMidRun) {
+        setHasDownloaded(true); 
+        setShowBackupWarning(false); 
+      }
     } catch (e) { alert("加密封印失败，请重试。"); }
   };
 
@@ -366,13 +391,14 @@ export default function App() {
             const m = Math.floor(total / 60); const s = total % 60;
             setHours(h); setMinutes(m); setSeconds(s);
             
-            // 恢复游戏状态
             if (payload.g) {
               setGameAttempts(payload.g.att ?? 5);
               setGameCooldownEnd(payload.g.cd ?? 0);
+              setEntropySeed(payload.g.seed ?? Math.floor(Math.random() * 1000000));
             } else {
                setGameAttempts(5);
                setGameCooldownEnd(0);
+               setEntropySeed(Math.floor(Math.random() * 1000000));
             }
 
             setIsTimeLocked(true);
@@ -404,19 +430,17 @@ export default function App() {
     setShowBackupWarning(false);
   };
 
-  // --- 游戏逻辑处理 ---
   const handleGameComplete = (timeChangeMs) => {
-    // 应用时间变化
     setEndTime(prev => prev + timeChangeMs);
     
-    // 扣除次数
     const newAttempts = gameAttempts - 1;
     setGameAttempts(newAttempts);
 
-    // 如果次数用完，设置冷却
     if (newAttempts <= 0) {
-      setGameCooldownEnd(Date.now() + 60 * 60 * 1000); // 1小时冷却
+      setGameCooldownEnd(Date.now() + 60 * 60 * 1000); 
     }
+
+    setEntropySeed(prev => (prev * 16807) % 2147483647);
 
     setShowGame(false);
   };
@@ -433,8 +457,8 @@ export default function App() {
     setHours(0); setMinutes(0); setSeconds(10);
     setIsTimeLocked(false); setHasDownloaded(false); setShowBackupWarning(false); setAbortStage(0);
     setShowGame(false);
-    // 重置游戏
     setGameAttempts(5); setGameCooldownEnd(0);
+    setEntropySeed(Math.floor(Math.random() * 1000000));
 
     if (fileInputRef.current) fileInputRef.current.value = "";
     if (restoreInputRef.current) restoreInputRef.current.value = "";
@@ -471,12 +495,12 @@ export default function App() {
 
       <div className={`max-w-md w-full bg-slate-900/80 backdrop-blur-xl rounded-2xl overflow-hidden relative transition-all duration-500 ${cardBorder}`}>
         
-        {/* 游戏浮层 */}
         {showGame && (
           <RouletteGame 
             onComplete={handleGameComplete} 
             onClose={() => setShowGame(false)} 
             remainingAttempts={gameAttempts}
+            entropySeed={entropySeed}
           />
         )}
 
@@ -484,8 +508,9 @@ export default function App() {
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800/60">
           <div className="flex items-center space-x-2">
             <div className="w-2 h-2 rounded-full bg-gradient-to-r from-pink-500 to-blue-500 animate-pulse"></div>
-            <span className={`font-bold tracking-wider text-sm ${gradientText}`}>
-              SECRET_PROTOCOL
+            {/* 标题改为中文 */}
+            <span className={`font-bold tracking-widest text-base ${gradientText}`}>
+              绝密档案协议
             </span>
           </div>
           
@@ -508,7 +533,6 @@ export default function App() {
         {/* 主内容区 */}
         <div className="p-8 min-h-[420px] flex flex-col items-center justify-center relative">
           
-          {/* === 1. 恢复模式 === */}
           {mode === 'restore' && status === 'idle' && (
             <div onClick={() => restoreInputRef.current.click()} className="w-full h-64 border-2 border-dashed border-slate-700 hover:border-blue-400/50 rounded-xl flex flex-col items-center justify-center cursor-pointer transition-all group bg-slate-800/20 hover:bg-slate-800/40">
               <div className="p-4 bg-slate-800 rounded-full mb-4 group-hover:scale-110 transition-transform shadow-lg shadow-blue-900/20">
@@ -520,7 +544,6 @@ export default function App() {
             </div>
           )}
 
-          {/* === 2. 新建模式 === */}
           {mode === 'new' && status === 'idle' && (
             <div onClick={() => fileInputRef.current.click()} className="w-full h-64 border-2 border-dashed border-slate-700 hover:border-pink-400/50 rounded-xl flex flex-col items-center justify-center cursor-pointer transition-all group bg-slate-800/20 hover:bg-slate-800/40">
               <div className="p-4 bg-slate-800 rounded-full mb-4 group-hover:scale-110 transition-transform shadow-lg shadow-pink-900/20">
@@ -532,7 +555,6 @@ export default function App() {
             </div>
           )}
 
-          {/* === 3. 准备就绪 (Ready) === */}
           {status === 'ready' && (
             <div className="w-full animate-in fade-in slide-in-from-bottom-4 duration-500 relative">
               <button onClick={resetSystem} className="absolute right-0 top-0 p-2 text-slate-600 hover:text-red-400 transition-colors" title="清除并返回">
@@ -565,17 +587,18 @@ export default function App() {
                 <div className="flex items-center justify-center space-x-2">
                   <div className="flex flex-col items-center">
                     <input type="number" min="0" disabled={isTimeLocked} style={{ colorScheme: 'dark' }} value={hours} onChange={(e) => setHours(Math.max(0, parseInt(e.target.value) || 0))} className={`w-14 bg-transparent text-center text-2xl font-bold outline-none border-b-2 transition-colors ${isTimeLocked ? 'text-slate-500 border-slate-800' : 'text-white border-pink-500/30 focus:border-pink-500'}`} />
-                    <span className="text-[9px] text-slate-500 mt-1 uppercase tracking-wider">HRS</span>
+                    {/* 时间单位改为中文 */}
+                    <span className="text-[10px] text-slate-500 mt-1 font-medium">时</span>
                   </div>
                   <span className="text-xl text-slate-600 pb-4">:</span>
                   <div className="flex flex-col items-center">
                     <input type="number" min="0" disabled={isTimeLocked} style={{ colorScheme: 'dark' }} value={minutes} onChange={(e) => setMinutes(Math.max(0, parseInt(e.target.value) || 0))} className={`w-14 bg-transparent text-center text-2xl font-bold outline-none border-b-2 transition-colors ${isTimeLocked ? 'text-slate-500 border-slate-800' : 'text-white border-pink-500/30 focus:border-pink-500'}`} />
-                    <span className="text-[9px] text-slate-500 mt-1 uppercase tracking-wider">MIN</span>
+                    <span className="text-[10px] text-slate-500 mt-1 font-medium">分</span>
                   </div>
                   <span className="text-xl text-slate-600 pb-4">:</span>
                   <div className="flex flex-col items-center">
                     <input type="number" min="0" disabled={isTimeLocked} style={{ colorScheme: 'dark' }} value={seconds} onChange={(e) => setSeconds(Math.max(0, parseInt(e.target.value) || 0))} className={`w-14 bg-transparent text-center text-2xl font-bold outline-none border-b-2 transition-colors ${isTimeLocked ? 'text-slate-500 border-slate-800' : 'text-white border-blue-500/30 focus:border-blue-500'}`} />
-                    <span className="text-[9px] text-slate-500 mt-1 uppercase tracking-wider">SEC</span>
+                    <span className="text-[10px] text-slate-500 mt-1 font-medium">秒</span>
                   </div>
                 </div>
               </div>
@@ -592,7 +615,7 @@ export default function App() {
                   </div>
                 )}
                 {!isTimeLocked && (
-                  <button onClick={downloadBackup} className={`w-full py-3 rounded-lg border transition-all flex items-center justify-center text-sm group ${hasDownloaded ? 'border-green-500/30 bg-green-500/5 text-green-400' : 'border-slate-700 hover:border-pink-500/30 hover:bg-pink-500/5 text-slate-400 hover:text-pink-300'}`}>
+                  <button onClick={() => downloadBackup(false)} className={`w-full py-3 rounded-lg border transition-all flex items-center justify-center text-sm group ${hasDownloaded ? 'border-green-500/30 bg-green-500/5 text-green-400' : 'border-slate-700 hover:border-pink-500/30 hover:bg-pink-500/5 text-slate-400 hover:text-pink-300'}`}>
                     <Fingerprint className="w-4 h-4 mr-2" />
                     {hasDownloaded ? "已生成加密备份" : "生成高强度加密备份"}
                   </button>
@@ -605,7 +628,6 @@ export default function App() {
             </div>
           )}
 
-          {/* === 4. 运行中 (Running) === */}
           {status === 'running' && (
             <div className="flex flex-col items-center justify-center w-full animate-in zoom-in duration-300">
                <div className="relative mb-6">
@@ -618,19 +640,18 @@ export default function App() {
                     const t = formatTimeFull(timeLeftMs);
                     return (
                       <>
-                          <div className="flex flex-col items-center"><span className="text-4xl sm:text-5xl font-black text-white">{t.h}</span><span className="text-[9px] text-slate-600">HRS</span></div>
+                          <div className="flex flex-col items-center"><span className="text-4xl sm:text-5xl font-black text-white">{t.h}</span><span className="text-[10px] text-slate-600">时</span></div>
                           <span className="text-2xl text-slate-600 relative -top-3">:</span>
-                          <div className="flex flex-col items-center"><span className="text-4xl sm:text-5xl font-black text-white">{t.m}</span><span className="text-[9px] text-slate-600">MIN</span></div>
+                          <div className="flex flex-col items-center"><span className="text-4xl sm:text-5xl font-black text-white">{t.m}</span><span className="text-[10px] text-slate-600">分</span></div>
                           <span className="text-2xl text-slate-600 relative -top-3">:</span>
-                          <div className="flex flex-col items-center"><span className="text-4xl sm:text-5xl font-black text-white">{t.s}</span><span className="text-[9px] text-slate-600">SEC</span></div>
+                          <div className="flex flex-col items-center"><span className="text-4xl sm:text-5xl font-black text-white">{t.s}</span><span className="text-[10px] text-slate-600">秒</span></div>
                           <span className="text-2xl text-slate-600 relative -top-3">:</span>
-                          <div className="flex flex-col items-center"><span className="text-4xl sm:text-5xl font-black text-red-500">{t.ms}</span><span className="text-[9px] text-red-500/50">MS</span></div>
+                          <div className="flex flex-col items-center"><span className="text-4xl sm:text-5xl font-black text-red-500">{t.ms}</span><span className="text-[10px] text-red-500/50">毫秒</span></div>
                       </>
                     );
                   })()}
                </div>
                
-               {/* 轮盘小游戏入口 */}
                <div className="mt-8 w-full px-4">
                   {gameCooldownEnd > 0 ? (
                     <div className="w-full py-3 bg-red-900/20 rounded-lg border border-red-900/50 text-center flex flex-col items-center justify-center">
@@ -656,10 +677,24 @@ export default function App() {
                       警告: 期望值为负，请谨慎操作
                   </p>
                </div>
+               
+               <div className="w-full px-4 mt-4">
+                  <button 
+                    onClick={() => downloadBackup(true)} 
+                    className="w-full py-3 bg-cyan-900/30 hover:bg-cyan-900/50 border border-cyan-500/30 hover:border-cyan-500/60 rounded-lg text-cyan-400 hover:text-cyan-200 text-xs font-bold transition-all flex items-center justify-center"
+                  >
+                    <Save className="w-4 h-4 mr-2" />
+                    保存当前进度 (MID_RUN_SAVE)
+                  </button>
+                  <p className="text-[9px] text-slate-500 text-center mt-1">
+                    注意: 生成包含当前剩余时间的恢复文件
+                  </p>
+               </div>
 
                <div className="mt-8 flex items-center space-x-2 px-4 py-2 bg-slate-900/50 rounded-full border border-slate-700/50">
                  <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></div>
-                 <span className="text-xs text-slate-400 font-mono tracking-widest">CONTENTS SECURED</span>
+                 {/* 状态改为中文 */}
+                 <span className="text-xs text-slate-400 font-mono tracking-widest">安全容器已锁定</span>
                </div>
 
                <button onClick={handleAbortClick} className={`mt-8 text-xs transition-all border-b pb-0.5 flex items-center ${abortStage === 0 ? 'text-slate-600 hover:text-red-400 border-transparent hover:border-red-400/30' : ''} ${abortStage === 1 ? 'text-yellow-500 font-bold border-yellow-500 animate-pulse' : ''} ${abortStage === 2 ? 'text-red-500 font-black border-red-500 animate-bounce' : ''}`}>
@@ -670,7 +705,6 @@ export default function App() {
             </div>
           )}
 
-          {/* === 5. 揭晓 === */}
           {status === 'revealed' && imageData && (
             <div className="flex flex-col items-center justify-center w-full animate-in zoom-in duration-500">
                <div className="relative group w-full max-h-[60vh] flex items-center justify-center bg-black/40 rounded-lg overflow-hidden border border-slate-700/50">
@@ -689,7 +723,8 @@ export default function App() {
 
         </div>
       </div>
-      <div className="fixed bottom-4 text-[10px] text-slate-600 font-mono tracking-widest opacity-50 pointer-events-none">DIGITAL_LOCKER // VER 8.0 // FINAL_DEPLOY</div>
+      {/* 底部改为中文 */}
+      <div className="fixed bottom-4 text-[10px] text-slate-600 font-mono tracking-widest opacity-50 pointer-events-none">数字保险箱 // V8.0 // 最终部署</div>
     </div>
   );
 }
